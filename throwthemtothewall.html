@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#050505" />
+  <title>Kugel-Simulation</title>
+  <style>
+    html,
+    body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #050505;
+      touch-action: none;
+      overscroll-behavior: none;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+    }
+
+    canvas {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      display: block;
+      background: #050505;
+      cursor: crosshair;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="world"></canvas>
+
+  <script>
+    (() => {
+      'use strict';
+
+      const canvas = document.getElementById('world');
+      const ctx = canvas.getContext('2d', { alpha: false });
+
+      const BALL_COUNT = 10000;
+      const DPR_LIMIT = 2.5;
+      const RADIUS = 2.5;
+      const DIAMETER = RADIUS * 2;
+      const ATTRACTION = 250;
+      const MAX_ATTRACTION = 50000;
+      const DISTANCE_ACCELERATION = .5;
+      const MAX_ACCELERATION = 2500;
+      const FRICTION = 1;
+      const WALL_BOUNCE = .5;
+      const BALL_BOUNCE = .9;
+      const MAX_SPEED = 5000;
+
+      let dpr = 1;
+      let width = 1;
+      let height = 1;
+      let lastTime = performance.now();
+
+      const target = {
+        x: 0,
+        y: 0,
+        active: false
+      };
+
+      const x = new Float32Array(BALL_COUNT);
+      const y = new Float32Array(BALL_COUNT);
+      const vx = new Float32Array(BALL_COUNT);
+      const vy = new Float32Array(BALL_COUNT);
+      const color = new Array(BALL_COUNT);
+
+      let gridCellSize = DIAMETER * 1.35;
+      let gridColumns = 1;
+      let gridRows = 1;
+      let grid = [];
+
+      function resize() {
+        dpr = Math.min(window.devicePixelRatio || 1, DPR_LIMIT);
+        width = Math.max(1, window.innerWidth);
+        height = Math.max(1, window.innerHeight);
+
+        canvas.width = Math.floor(width * dpr);
+        canvas.height = Math.floor(height * dpr);
+        canvas.style.width = width + 'px';
+        canvas.style.height = height + 'px';
+
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        gridCellSize = Math.max(DIAMETER * 1.25, 5);
+        gridColumns = Math.max(1, Math.ceil(width / gridCellSize));
+        gridRows = Math.max(1, Math.ceil(height / gridCellSize));
+        grid = Array.from({ length: gridColumns * gridRows }, () => []);
+
+        if (!target.active) {
+          target.x = width * 0.5;
+          target.y = height * 0.5;
+        }
+      }
+
+      function randomColor(index) {
+        const hue = (index * 137.508 + Math.random() * 30) % 360;
+        const saturation = 76 + Math.random() * 20;
+        const lightness = 53 + Math.random() * 17;
+        return `hsl(${hue}, ${saturation}%, ${lightness}%)`;
+      }
+
+      function seedBalls() {
+        const columns = Math.ceil(Math.sqrt(BALL_COUNT * width / height));
+        const rows = Math.ceil(BALL_COUNT / columns);
+        const cellWidth = width / columns;
+        const cellHeight = height / rows;
+
+        for (let i = 0; i < BALL_COUNT; i++) {
+          const column = i % columns;
+          const row = Math.floor(i / columns);
+
+          x[i] = Math.min(width - RADIUS, Math.max(RADIUS, column * cellWidth + cellWidth * 0.5));
+          y[i] = Math.min(height - RADIUS, Math.max(RADIUS, row * cellHeight + cellHeight * 0.5));
+
+          vx[i] = 0;
+          vy[i] = 0;
+          color[i] = randomColor(i);
+        }
+      }
+
+      function setTarget(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        target.x = clientX - rect.left;
+        target.y = clientY - rect.top;
+        target.active = true;
+      }
+
+      function clampSpeed(index) {
+        const speedSq = vx[index] * vx[index] + vy[index] * vy[index];
+        const maxSq = MAX_SPEED * MAX_SPEED;
+        if (speedSq > maxSq) {
+          const factor = MAX_SPEED / Math.sqrt(speedSq);
+          vx[index] *= factor;
+          vy[index] *= factor;
+        }
+      }
+
+      function buildGrid() {
+        for (let i = 0; i < grid.length; i++) grid[i].length = 0;
+
+        for (let i = 0; i < BALL_COUNT; i++) {
+          const gx = Math.max(0, Math.min(gridColumns - 1, Math.floor(x[i] / gridCellSize)));
+          const gy = Math.max(0, Math.min(gridRows - 1, Math.floor(y[i] / gridCellSize)));
+          grid[gy * gridColumns + gx].push(i);
+        }
+      }
+
+      function solveBallCollision(i, j) {
+        const dx = x[j] - x[i];
+        const dy = y[j] - y[i];
+        const distSq = dx * dx + dy * dy;
+        const minDist = DIAMETER;
+
+        if (distSq <= 0 || distSq >= minDist * minDist) return;
+
+        const dist = Math.sqrt(distSq);
+        const nx = dx / dist;
+        const ny = dy / dist;
+        const overlap = minDist - dist;
+        const correction = overlap * 0.5;
+
+        x[i] -= nx * correction;
+        y[i] -= ny * correction;
+        x[j] += nx * correction;
+        y[j] += ny * correction;
+
+        const rvx = vx[j] - vx[i];
+        const rvy = vy[j] - vy[i];
+        const separatingVelocity = rvx * nx + rvy * ny;
+
+        if (separatingVelocity < 0) {
+          const impulse = -(1 + BALL_BOUNCE) * separatingVelocity * 0.5;
+          const ix = impulse * nx;
+          const iy = impulse * ny;
+
+          vx[i] -= ix;
+          vy[i] -= iy;
+          vx[j] += ix;
+          vy[j] += iy;
+        }
+      }
+
+      function solveCollisions() {
+        buildGrid();
+
+        for (let gy = 0; gy < gridRows; gy++) {
+          for (let gx = 0; gx < gridColumns; gx++) {
+            const cell = grid[gy * gridColumns + gx];
+            if (cell.length === 0) continue;
+
+            for (let a = 0; a < cell.length; a++) {
+              const i = cell[a];
+
+              for (let b = a + 1; b < cell.length; b++) {
+                solveBallCollision(i, cell[b]);
+              }
+
+              for (let oy = -1; oy <= 1; oy++) {
+                for (let ox = -1; ox <= 1; ox++) {
+                  if (oy < 0 || (oy === 0 && ox <= 0)) continue;
+
+                  const nx = gx + ox;
+                  const ny = gy + oy;
+                  if (nx < 0 || nx >= gridColumns || ny < 0 || ny >= gridRows) continue;
+
+                  const other = grid[ny * gridColumns + nx];
+                  for (let b = 0; b < other.length; b++) {
+                    solveBallCollision(i, other[b]);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      function solveWalls() {
+        const minX = RADIUS;
+        const minY = RADIUS;
+        const maxX = width - RADIUS;
+        const maxY = height - RADIUS;
+
+        for (let i = 0; i < BALL_COUNT; i++) {
+          if (x[i] < minX) {
+            x[i] = minX;
+            vx[i] = Math.abs(vx[i]) * WALL_BOUNCE;
+          } else if (x[i] > maxX) {
+            x[i] = maxX;
+            vx[i] = -Math.abs(vx[i]) * WALL_BOUNCE;
+          }
+
+          if (y[i] < minY) {
+            y[i] = minY;
+            vy[i] = Math.abs(vy[i]) * WALL_BOUNCE;
+          } else if (y[i] > maxY) {
+            y[i] = maxY;
+            vy[i] = -Math.abs(vy[i]) * WALL_BOUNCE;
+          }
+        }
+      }
+
+      function attractToTarget(dt) {
+        if (!target.active) return;
+
+        for (let i = 0; i < BALL_COUNT; i++) {
+          const dx = target.x - x[i];
+          const dy = target.y - y[i];
+          const distSq = dx * dx + dy * dy;
+          const dist = Math.sqrt(distSq) || 1;
+
+          const falloff = Math.min(MAX_ATTRACTION, ATTRACTION + dist * 2.4);
+          const ax = dx / dist * falloff;
+          const ay = dy / dist * falloff;
+
+          vx[i] = (vx[i] + ax * dt) * FRICTION;
+          vy[i] = (vy[i] + ay * dt) * FRICTION;
+          clampSpeed(i);
+        }
+      }
+
+      function simulate(dt) {
+        attractToTarget(dt);
+
+        for (let i = 0; i < BALL_COUNT; i++) {
+          x[i] += vx[i] * dt;
+          y[i] += vy[i] * dt;
+        }
+
+        solveWalls();
+        solveCollisions();
+        solveWalls();
+      }
+
+      function draw() {
+        ctx.fillStyle = '#050505';
+        ctx.fillRect(0, 0, width, height);
+
+        for (let i = 0; i < BALL_COUNT; i++) {
+          ctx.beginPath();
+          ctx.arc(x[i], y[i], RADIUS, 0, Math.PI * 2);
+          ctx.fillStyle = color[i];
+          ctx.fill();
+        }
+      }
+
+      function frame(now) {
+        const dt = Math.min(0.024, Math.max(0.001, (now - lastTime) / 1000));
+        lastTime = now;
+
+        simulate(dt);
+        draw();
+
+        requestAnimationFrame(frame);
+      }
+
+      function handlePointer(event) {
+        setTarget(event.clientX, event.clientY);
+      }
+
+      function handleTouch(event) {
+        if (!event.touches || event.touches.length === 0) return;
+        const touch = event.touches[0];
+        setTarget(touch.clientX, touch.clientY);
+      }
+
+      window.addEventListener('resize', () => {
+        resize();
+        for (let i = 0; i < BALL_COUNT; i++) {
+          x[i] = Math.max(RADIUS, Math.min(width - RADIUS, x[i]));
+          y[i] = Math.max(RADIUS, Math.min(height - RADIUS, y[i]));
+        }
+      });
+
+      window.addEventListener('pointerdown', handlePointer, { passive: true });
+      window.addEventListener('pointermove', event => {
+        if (event.buttons > 0 || event.pointerType === 'touch') handlePointer(event);
+      }, { passive: true });
+      window.addEventListener('touchstart', handleTouch, { passive: true });
+      window.addEventListener('touchmove', handleTouch, { passive: true });
+
+      resize();
+      seedBalls();
+      requestAnimationFrame(frame);
+    })();
+  </script>
+</body>
+</html>
